@@ -5,12 +5,11 @@ import org.apache.commons.math3.distribution.BinomialDistribution;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.broadinstitute.hellbender.utils.MathUtils;
+import org.broadinstitute.hellbender.utils.OptimizationUtils;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.DoubleUnaryOperator;
-import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
 public class ContaminationEngine {
@@ -19,12 +18,9 @@ public class ContaminationEngine {
 
     private ContaminationEngine() { }
 
-    // TODO: replace this completely with something that does MLE of all sites
-    public static double calculateMinorAlleleFraction(final List<PileupSummary> segment) {
-        return 0.5;
-        // TODO: this is a stand-in for the correct optimization
-        final DoubleUnaryOperator objective = maf -> ContaminationEngine.logLikelihoodOfHetsInSegment(hets, maf);
-        //return OptimizationUtils.argmax(objective, ALT_FRACTIONS_FOR_SEGMENTATION.getMinimum(), 0.5, 0.4, 0.01, 0.01, 20);
+    public static double calculateMinorAlleleFraction(final ContaminationModel model, final List<PileupSummary> segment) {
+        final DoubleUnaryOperator objective = maf -> segment.stream().mapToDouble(site -> model.logLikelihood(site, maf)).sum();
+        return OptimizationUtils.argmax(objective, 0.1, 0.5, 0.4, 0.01, 0.01, 20);
     }
 
     public static List<PileupSummary> segmentHomAlts(final List<PileupSummary> segment, final double contamination, double minimiumMinorAlleleFraction) {
@@ -33,91 +29,7 @@ public class ContaminationEngine {
                 segment.stream().filter(site -> homAltProbability(site, minorAlleleFraction, contamination) > 0.5).collect(Collectors.toList());
     }
 
-    private enum SampleGenotype {
-        HOM_REF(maf -> 0,f -> (1 - f) * (1 - f)),
-        ALT_MINOR(maf -> maf, f -> f * (1 - f)),
-        ALT_MAJOR(maf -> 1 - maf, f -> f * (1 - f)),
-        HOM_ALT(maf -> 1, f -> f * f);
-
-        final DoubleUnaryOperator alleleFractionFunction;
-        final DoubleUnaryOperator priorFunction;
-
-        SampleGenotype(final DoubleUnaryOperator alleleFractionFunction, final DoubleUnaryOperator priorFunction) {
-            this.alleleFractionFunction = alleleFractionFunction;
-            this.priorFunction = priorFunction;
-        }
-
-        public double af(final double maf) {
-            return alleleFractionFunction.applyAsDouble(maf);
-        }
-
-        public double prior(final double alleleFrequency) {
-            return priorFunction.applyAsDouble(alleleFrequency);
-        }
-    }
-
     //private static final List<SampleGenotype> SAMPLE_GENOTYPES = Arrays.asList(
-
-    private enum ContaminantGenotype {
-        HOM_REF(0, f -> (1 - f) * ( 1 - f)), HET(0.5, f -> 2 * f * (1 - f)), HOM_ALT(1, f -> f * f);
-
-        final double af;
-        final DoubleUnaryOperator priorFunction;
-
-        ContaminantGenotype(final double af, final DoubleUnaryOperator priorFunction) {
-            this.af = af;
-            this.priorFunction = priorFunction;
-        }
-
-        public double af() {
-            return af;
-        }
-
-        public double prior(final double alleleFrequency) {
-            return priorFunction.applyAsDouble(alleleFrequency);
-        }
-    }
-
-    private static double contaminantSum(final ToDoubleFunction<ContaminantGenotype> func) {
-        double result = 0;
-        for (final ContaminantGenotype genotype : ContaminantGenotype.values()) {
-            result += func.applyAsDouble(genotype);
-        }
-        return result;
-    }
-
-    public static double uncontaminatedLikelihood(final PileupSummary site, final double maf) {
-        return infiniteContaminantLikelihood(site, maf, 0);
-    }
-
-    public static double infiniteContaminantLikelihood(final PileupSummary site, final double maf, final double c) {
-        final double f = site.getAlleleFrequency();
-        final int k = site.getAltCount();
-        final int n = k + site.getRefCount();
-
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) * binom(k, n, (1 - c) * g.af(maf) + c * f)).sum();
-    }
-
-    public static double singleContaminantLikelihood(final PileupSummary site, final double maf, final double c) {
-        final double f = site.getAlleleFrequency();
-        final int k = site.getAltCount();
-        final int n = k + site.getRefCount();
-
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) * contaminantSum(h -> h.prior(f) * binom(k, n, (1 - c) * g.af(maf) + c * h.af()))).sum();
-    }
-
-    public static double twoContaminantLikelihood(final PileupSummary site, final double maf, final double c1, final double c2) {
-        final double f = site.getAlleleFrequency();
-        final int k = site.getAltCount();
-        final int n = k + site.getRefCount();
-
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) *
-                        contaminantSum(h -> h.prior(f) *
-                                contaminantSum(i -> i.prior(f) * binom(k, n, (1 - c1 - c2) * g.af(maf) + c1 * h.af() + c1 * i.af())))).sum();
-    }
 
     public static double homAltProbability(final PileupSummary site, final double minorAlleleFraction, final double contamination) {
         final double alleleFrequency = site.getAlleleFrequency();
@@ -168,10 +80,6 @@ public class ContaminationEngine {
         logger.info(String.format("The error bars on this estimate are %.5f.", standardError));
 
         return Pair.of(Math.min(contamination, 1.0), standardError);
-    }
-
-    private static double binom(final int k, final int n, final double p) {
-        return new BinomialDistribution(null, n, p).probability(k);
     }
 
 }

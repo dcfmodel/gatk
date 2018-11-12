@@ -12,12 +12,14 @@ import org.broadinstitute.barclay.argparser.CommandLineProgramProperties;
 import org.broadinstitute.barclay.help.DocumentedFeature;
 import org.broadinstitute.hellbender.cmdline.CommandLineProgram;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
-import picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
 import org.broadinstitute.hellbender.utils.SimpleInterval;
+import picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup;
 
 import java.io.File;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.stream.Collectors;
 
 /**
@@ -75,8 +77,6 @@ public class CalculateContamination extends CommandLineProgram {
 
     public static final Logger logger = LogManager.getLogger(CalculateContamination.class);
 
-    // our analysis only cares about hom alt and het sites, so we throw away hom refs with a very conservative heuristic
-    private static final double ALT_FRACTION_OF_DEFINITE_HOM_REF = 0.05;
 
     private static final double STRICT_LOH_MAF_THRESHOLD = 0.4;
 
