@@ -77,18 +77,13 @@ public class CalculateContamination extends CommandLineProgram {
 
     public static final Logger logger = LogManager.getLogger(CalculateContamination.class);
 
-
-    private static final double STRICT_LOH_MAF_THRESHOLD = 0.4;
-
-    private static final double INITIAL_CONTAMINATION_GUESS = 0.05;
-    private static final int MAX_ITERATIONS = 10;
-    private static final double CONTAMINATION_CONVERGENCE_THRESHOLD = 0.001;
-
+    private static final int NUM_ITERATIONS = 3;
     private static final int MIN_COVERAGE = 10;
     private static final double DEFAULT_LOW_COVERAGE_RATIO_THRESHOLD = 1.0/2;
     private static final double DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD = 3.0;
-    public static final int DESIRED_MINIMUM_HOM_ALT_COUNT = 50;
-    public static final double MINOR_ALLELE_FRACTION_STEP_SIZE = 0.05;
+
+    public static final List<Double> CONTAMINATIONS_FOR_COMPARISON =
+            Arrays.asList(0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.15, 0.2);
 
     @Argument(fullName = StandardArgumentDefinitions.INPUT_LONG_NAME,
             shortName = StandardArgumentDefinitions.INPUT_SHORT_NAME,
@@ -132,33 +127,33 @@ public class CalculateContamination extends CommandLineProgram {
         final List<PileupSummary> genotypingSites = matchedPileupSummariesTable == null ? sites :
                 filterSitesByCoverage(PileupSummary.readFromFile(matchedPileupSummariesTable));
 
+        final double genotypingErrorRate = errorRate(genotypingSites);
+
         // partition genome into minor allele fraction (MAF) segments to better distinguish hom alts from LoH hets.
         final List<List<PileupSummary>> genotypingSegments = ContaminationSegmenter.findSegments(genotypingSites);
 
-        // TODO: 1. Estimate contamination and best-fit contamination model from least LoH segments
-        // TODO:    A good way to estimate LoH is to take the ratio of to expected hets = sum_sites 2f(1-f)
-        // TODO: 2. Estimate MAF of each segment
+        List<ContaminationModel> genotypingModelsToCompare = makeModelsToCompare(genotypingErrorRate);
+        List<Double> genotypingMAFs;
+        ContaminationModel genotypingModel = ContaminationModel.createNoContaminantModel(genotypingErrorRate);
+
+        for (int n = 0; n < NUM_ITERATIONS; n++) {
+            final ContaminationModel genotypingModelForLambda = genotypingModel;
+            genotypingMAFs = genotypingSegments.stream()
+                    .map(segment -> ContaminationEngine.calculateMinorAlleleFraction(genotypingModelForLambda, segment))
+                    .collect(Collectors.toList());
+            genotypingModel = ContaminationEngine.chooseBestModel(genotypingModelsToCompare, genotypingSegments, genotypingMAFs);
+            // TODO: logging
+        }
 
 
-        List<PileupSummary> homAltGenotypingSites = new ArrayList<>();
-        final MutableDouble genotypingContamination = new MutableDouble(INITIAL_CONTAMINATION_GUESS);
-
-        for (int iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
             List<List<PileupSummary>> homAltSitesBySegment = Arrays.asList(new ArrayList<>());
-            final MutableDouble minorAlleleFractionThreshold = new MutableDouble(STRICT_LOH_MAF_THRESHOLD);
-            while (homAltSitesBySegment.stream().mapToInt(List::size).sum() < DESIRED_MINIMUM_HOM_ALT_COUNT && minorAlleleFractionThreshold.doubleValue() > 0) {
                 homAltSitesBySegment = genotypingSegments.stream()
                         .map(segment -> ContaminationEngine.segmentHomAlts(segment, genotypingContamination.doubleValue(), minorAlleleFractionThreshold.doubleValue()))
                         .collect(Collectors.toList());
-                minorAlleleFractionThreshold.subtract(MINOR_ALLELE_FRACTION_STEP_SIZE);
-            }
+
             homAltGenotypingSites = homAltSitesBySegment.stream().flatMap(List::stream).collect(Collectors.toList());
-            final double newGenotypingContamination = ContaminationEngine.calculateContamination(homAltGenotypingSites, errorRate(genotypingSites)).getLeft();
-            if (Math.abs(newGenotypingContamination - genotypingContamination.doubleValue()) < CONTAMINATION_CONVERGENCE_THRESHOLD) {
-                break;
-            }
-            genotypingContamination.setValue(newGenotypingContamination);
-        }
+
+
 
         if (outputTumorSegmentation != null) {
             final List<List<PileupSummary>> tumorSegments = matchedPileupSummariesTable == null ?
@@ -212,6 +207,17 @@ public class CalculateContamination extends CommandLineProgram {
         return coveredSites.stream()
                 .filter(ps -> ps.getTotalCount() > lowCoverageThreshold && ps.getTotalCount() < highCoverageThreshold)
                 .collect(Collectors.toList());
+    }
+
+    private List<ContaminationModel> makeModelsToCompare(final double eps) {
+        final List<ContaminationModel> result = new ArrayList<>();
+        for (final double c : CONTAMINATIONS_FOR_COMPARISON) {
+            result.add(ContaminationModel.createInfiniteContaminantModel(eps, c));
+            result.add(ContaminationModel.createSingleContaminantModel(eps, c));
+            result.add(ContaminationModel.createTwoContaminantModel(eps, 0.5 * c, 0.5 * c));
+            result.add(ContaminationModel.createTwoContaminantModel(eps, 0.25 * c, 0.75 * c));
+        }
+        return result;
     }
 
 }

@@ -3,9 +3,12 @@ package org.broadinstitute.hellbender.tools.walkers.contamination;
 import org.apache.commons.math3.distribution.BinomialDistribution;
 import org.apache.commons.math3.util.FastMath;
 import org.broadinstitute.hellbender.exceptions.GATKException;
+import org.broadinstitute.hellbender.utils.IndexRange;
+import org.broadinstitute.hellbender.utils.Utils;
 import org.broadinstitute.hellbender.utils.functional.DoubleToDoubleBiFunction;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.function.DoubleUnaryOperator;
 import java.util.function.ToDoubleFunction;
 
@@ -87,7 +90,7 @@ public class ContaminationModel {
         return new BinomialDistribution(null, n, p).probability(k);
     }
 
-    public double likelihood(final PileupSummary site, final double maf) {
+    private double likelihood(final PileupSummary site, final double maf) {
         if(type == ContaminationModelType.NO_CONTAMINANT) {
             return uncontaminatedLikelihood(site, maf, eps);
         } else if (type == ContaminationModelType.INFINITE_CONTAMINANT) {
@@ -101,8 +104,17 @@ public class ContaminationModel {
         }
     }
 
-    public double logLikelihood(final PileupSummary site, final double maf) {
+    private double logLikelihood(final PileupSummary site, final double maf) {
         return FastMath.log(likelihood(site, maf));
+    }
+
+    public double logLikelihood(final List<PileupSummary> segment, final double maf) {
+        return segment.stream().mapToDouble(site -> logLikelihood(site, maf)).sum();
+    }
+
+    public double logLikelihood(final List<List<PileupSummary>> segments, final List<Double> mafs) {
+        Utils.validate(segments.size() == mafs.size(), " Must have one MAF per segment");
+        return new IndexRange(0, segments.size()).sum(n -> logLikelihood(segments.get(n), mafs.get(n)));
     }
 
     private enum SampleGenotype {

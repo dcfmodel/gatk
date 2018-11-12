@@ -19,40 +19,18 @@ public class ContaminationEngine {
     private ContaminationEngine() { }
 
     public static double calculateMinorAlleleFraction(final ContaminationModel model, final List<PileupSummary> segment) {
-        final DoubleUnaryOperator objective = maf -> segment.stream().mapToDouble(site -> model.logLikelihood(site, maf)).sum();
+        final DoubleUnaryOperator objective = maf -> model.logLikelihood(segment, maf);
         return OptimizationUtils.argmax(objective, 0.1, 0.5, 0.4, 0.01, 0.01, 20);
     }
 
-    public static List<PileupSummary> segmentHomAlts(final List<PileupSummary> segment, final double contamination, double minimiumMinorAlleleFraction) {
-        final double minorAlleleFraction = calculateMinorAlleleFraction(segment);
-        return minorAlleleFraction < minimiumMinorAlleleFraction ? Collections.emptyList() :
-                segment.stream().filter(site -> homAltProbability(site, minorAlleleFraction, contamination) > 0.5).collect(Collectors.toList());
+    public static ContaminationModel chooseBestModel(final List<ContaminationModel> models, final List<List<PileupSummary>> segments, final List<Double> mafs) {
+        final double[] logLikelihoods = models.stream().mapToDouble(model -> model.logLikelihood(segments, mafs)).toArray();
+        return models.get(MathUtils.maxElementIndex(logLikelihoods));
     }
 
-    //private static final List<SampleGenotype> SAMPLE_GENOTYPES = Arrays.asList(
-
-    public static double homAltProbability(final PileupSummary site, final double minorAlleleFraction, final double contamination) {
-        final double alleleFrequency = site.getAlleleFrequency();
-        final double homAltPrior = MathUtils.square(alleleFrequency);
-        final double hetPrior = 2 * alleleFrequency * (1 - alleleFrequency);
-
-        final int altCount = site.getAltCount();
-        final int totalCount = altCount + site.getRefCount();
-
-        if (altCount < totalCount / 2) {
-            return 0;
-        }
-
-        final double homAltLikelihood = new BinomialDistribution(null, totalCount, 1 - contamination).probability(altCount);
-        final double hetLikelihood = new BinomialDistribution(null, totalCount, 1 - minorAlleleFraction).probability(altCount);
-
-        final double unnormalizedHomAltProbability = homAltPrior * homAltLikelihood;
-        final double unnormalizedHetProbability = hetPrior * hetLikelihood;
-
-        final double result = unnormalizedHomAltProbability / (unnormalizedHetProbability + unnormalizedHomAltProbability);
-
-        return result;
-
+    // TODO: add a hom alt probability method to the model, which can recyle most code from the likelihood method
+    public static List<PileupSummary> segmentHomAlts(final ContaminationModel model, final List<PileupSummary> segment, double maf) {
+        return segment.stream().filter(site -> homAltProbability(site, minorAlleleFraction, contamination) > 0.5).collect(Collectors.toList());
     }
 
     public static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final double errorRate) {
