@@ -7,15 +7,31 @@ import org.apache.logging.log4j.Logger;
 import org.broadinstitute.hellbender.utils.MathUtils;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.DoubleUnaryOperator;
 import java.util.function.ToDoubleFunction;
+import java.util.stream.Collectors;
 
 public class ContaminationEngine {
 
     public static final Logger logger = LogManager.getLogger(ContaminationEngine.class);
 
     private ContaminationEngine() { }
+
+    // TODO: replace this completely with something that does MLE of all sites
+    public static double calculateMinorAlleleFraction(final List<PileupSummary> segment) {
+        return 0.5;
+        // TODO: this is a stand-in for the correct optimization
+        final DoubleUnaryOperator objective = maf -> ContaminationEngine.logLikelihoodOfHetsInSegment(hets, maf);
+        //return OptimizationUtils.argmax(objective, ALT_FRACTIONS_FOR_SEGMENTATION.getMinimum(), 0.5, 0.4, 0.01, 0.01, 20);
+    }
+
+    public static List<PileupSummary> segmentHomAlts(final List<PileupSummary> segment, final double contamination, double minimiumMinorAlleleFraction) {
+        final double minorAlleleFraction = calculateMinorAlleleFraction(segment);
+        return minorAlleleFraction < minimiumMinorAlleleFraction ? Collections.emptyList() :
+                segment.stream().filter(site -> homAltProbability(site, minorAlleleFraction, contamination) > 0.5).collect(Collectors.toList());
+    }
 
     private enum SampleGenotype {
         HOM_REF(maf -> 0,f -> (1 - f) * (1 - f)),
@@ -68,6 +84,10 @@ public class ContaminationEngine {
             result += func.applyAsDouble(genotype);
         }
         return result;
+    }
+
+    public static double uncontaminatedLikelihood(final PileupSummary site, final double maf) {
+        return infiniteContaminantLikelihood(site, maf, 0);
     }
 
     public static double infiniteContaminantLikelihood(final PileupSummary site, final double maf, final double c) {
@@ -153,4 +173,5 @@ public class ContaminationEngine {
     private static double binom(final int k, final int n, final double p) {
         return new BinomialDistribution(null, n, p).probability(k);
     }
+
 }

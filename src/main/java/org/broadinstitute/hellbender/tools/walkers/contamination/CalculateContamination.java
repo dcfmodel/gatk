@@ -13,14 +13,12 @@ import org.broadinstitute.barclay.help.DocumentedFeature;
 import org.broadinstitute.hellbender.cmdline.CommandLineProgram;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
 import picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup;
-import org.broadinstitute.hellbender.tools.copynumber.utils.segmentation.KernelSegmenter;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
 import org.broadinstitute.hellbender.utils.SimpleInterval;
 
 import java.io.File;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 /**
  * <p>
@@ -128,20 +126,18 @@ public class CalculateContamination extends CommandLineProgram {
 
     @Override
     public Object doWork() {
-        // TODO: this removes hom ref!!!
-        final List<PileupSummary> sites = filterSites(PileupSummary.readFromFile(inputPileupSummariesTable));
+        final List<PileupSummary> sites = filterSitesByCoverage(PileupSummary.readFromFile(inputPileupSummariesTable));
 
         // used the matched normal to genotype (i.e. find hom alt sites) if available
         final List<PileupSummary> genotypingSites = matchedPileupSummariesTable == null ? sites :
-                filterSites(PileupSummary.readFromFile(matchedPileupSummariesTable));
+                filterSitesByCoverage(PileupSummary.readFromFile(matchedPileupSummariesTable));
 
-        // we partition the genome into contiguous allelic copy-number segments in order to infer the local minor
-        // allele fraction at each site.  This is important because a minor allele fraction close to 1/2 (neutral)
-        // allows hets and hom alts to be distinguished easily, while a low minor allele fraction makes it harder
-        // to discriminate.  It is crucial to know which site are true hom alts and which sites are hets with
-        // loss of heterozygosity.  We do this for the genotyping sample because that is the sample from which
-        // the hom alts are deduced.
+        // partition genome into minor allele fraction (MAF) segments to better distinguish hom alts from LoH hets.
         final List<List<PileupSummary>> genotypingSegments = ContaminationSegmenter.findSegments(genotypingSites);
+
+        // TODO: 1. Estimate contamination and best-fit contamination model from least LoH segments
+        // TODO:    A good way to estimate LoH is to take the ratio of to expected hets = sum_sites 2f(1-f)
+        // TODO: 2. Estimate MAF of each segment
 
 
         List<PileupSummary> homAltGenotypingSites = new ArrayList<>();
@@ -152,7 +148,7 @@ public class CalculateContamination extends CommandLineProgram {
             final MutableDouble minorAlleleFractionThreshold = new MutableDouble(STRICT_LOH_MAF_THRESHOLD);
             while (homAltSitesBySegment.stream().mapToInt(List::size).sum() < DESIRED_MINIMUM_HOM_ALT_COUNT && minorAlleleFractionThreshold.doubleValue() > 0) {
                 homAltSitesBySegment = genotypingSegments.stream()
-                        .map(segment -> ContaminationSegmenter.segmentHomAlts(segment, genotypingContamination.doubleValue(), minorAlleleFractionThreshold.doubleValue()))
+                        .map(segment -> ContaminationEngine.segmentHomAlts(segment, genotypingContamination.doubleValue(), minorAlleleFractionThreshold.doubleValue()))
                         .collect(Collectors.toList());
                 minorAlleleFractionThreshold.subtract(MINOR_ALLELE_FRACTION_STEP_SIZE);
             }
@@ -190,22 +186,21 @@ public class CalculateContamination extends CommandLineProgram {
         return 1.5 * ((double) otherAltBases / totalBases);
     }
 
-    // subset sites in the contaminated sample to hom alt site found in the genotyping sample
     private static List<PileupSummary> subsetSites(final List<PileupSummary> sites, final List<PileupSummary> subsetLoci) {
-        final OverlapDetector<PileupSummary> homAltsInMatchedNormalOverlapDetector = OverlapDetector.create(subsetLoci);
-        return sites.stream().filter(homAltsInMatchedNormalOverlapDetector::overlapsAny).collect(Collectors.toList());
+        final OverlapDetector<PileupSummary> od = OverlapDetector.create(subsetLoci);
+        return sites.stream().filter(od::overlapsAny).collect(Collectors.toList());
     }
 
     private MinorAlleleFractionRecord makeMinorAlleleFractionRecord(final List<PileupSummary> segment) {
         final String contig = segment.get(0).getContig();
         final int start = segment.get(0).getStart();
         final int end = segment.get(segment.size() - 1).getEnd();
-        final double minorAlleleFraction = ContaminationSegmenter.calculateMinorAlleleFraction(segment);
+        final double minorAlleleFraction = ContaminationEngine.calculateMinorAlleleFraction(segment);
         return new MinorAlleleFractionRecord(new SimpleInterval(contig, start, end), minorAlleleFraction);
     }
 
 
-    private List<PileupSummary> filterSites(final List<PileupSummary> allSites) {
+    private List<PileupSummary> filterSitesByCoverage(final List<PileupSummary> allSites) {
         // Just in case the intervals given to GetPileupSummaries contained un-covered sites, we remove them
         // so that a bunch of zeroes don't throw off the median coverage
         final List<PileupSummary> coveredSites = allSites.stream().filter(s -> s.getTotalCount() > MIN_COVERAGE).collect(Collectors.toList());
@@ -216,7 +211,6 @@ public class CalculateContamination extends CommandLineProgram {
         final double highCoverageThreshold = meanCoverage * highCoverageRatioThreshold;
         return coveredSites.stream()
                 .filter(ps -> ps.getTotalCount() > lowCoverageThreshold && ps.getTotalCount() < highCoverageThreshold)
-                .filter(ps -> ps.getAltFraction() > ALT_FRACTION_OF_DEFINITE_HOM_REF)
                 .collect(Collectors.toList());
     }
 
