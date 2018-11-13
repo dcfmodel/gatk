@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * <p>
@@ -133,7 +134,7 @@ public class CalculateContamination extends CommandLineProgram {
         final List<List<PileupSummary>> genotypingSegments = ContaminationSegmenter.findSegments(genotypingSites);
 
         List<ContaminationModel> genotypingModelsToCompare = makeModelsToCompare(genotypingErrorRate);
-        List<Double> genotypingMAFs;
+        List<Double> genotypingMAFs = genotypingSegments.stream().map(segment -> 0.5).collect(Collectors.toList());
         ContaminationModel genotypingModel = ContaminationModel.createNoContaminantModel(genotypingErrorRate);
 
         for (int n = 0; n < NUM_ITERATIONS; n++) {
@@ -145,15 +146,12 @@ public class CalculateContamination extends CommandLineProgram {
             // TODO: logging
         }
 
-
-            List<List<PileupSummary>> homAltSitesBySegment = Arrays.asList(new ArrayList<>());
-                homAltSitesBySegment = genotypingSegments.stream()
-                        .map(segment -> ContaminationEngine.segmentHomAlts(segment, genotypingContamination.doubleValue(), minorAlleleFractionThreshold.doubleValue()))
-                        .collect(Collectors.toList());
-
-            homAltGenotypingSites = homAltSitesBySegment.stream().flatMap(List::stream).collect(Collectors.toList());
-
-
+        final List<PileupSummary> homAltGenotypingSites = new ArrayList<>();
+        final List<PileupSummary> homRefGenotypingSites = new ArrayList<>();
+        for (int n = 0; n < genotypingSegments.size(); n++) {
+            homAltGenotypingSites.addAll(ContaminationEngine.segmentHomAlts(genotypingModel, genotypingSegments.get(n), genotypingMAFs.get(n)));
+            homAltGenotypingSites.addAll(ContaminationEngine.segmentHomRefs(genotypingModel, genotypingSegments.get(n), genotypingMAFs.get(n)));
+        }
 
         if (outputTumorSegmentation != null) {
             final List<List<PileupSummary>> tumorSegments = matchedPileupSummariesTable == null ?

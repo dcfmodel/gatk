@@ -4,6 +4,7 @@ import org.apache.commons.math3.distribution.BinomialDistribution;
 import org.apache.commons.math3.util.FastMath;
 import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.utils.IndexRange;
+import org.broadinstitute.hellbender.utils.MathUtils;
 import org.broadinstitute.hellbender.utils.Utils;
 import org.broadinstitute.hellbender.utils.functional.DoubleToDoubleBiFunction;
 
@@ -47,61 +48,71 @@ public class ContaminationModel {
 
     private static double contaminantSum(final ToDoubleFunction<ContaminantGenotype> func) {
         double result = 0;
-        for (final ContaminantGenotype genotype : ContaminantGenotype.values()) {
+        for (final ContaminantGenotype genotype : ContaminantGenotype.ALL_CONTAMINANT_GENOTYPES) {
             result += func.applyAsDouble(genotype);
         }
         return result;
     }
 
-    private static double uncontaminatedLikelihood(final PileupSummary site, final double maf, final double eps) {
-        return infiniteContaminantLikelihood(site, maf, eps, 0);
+    private static double[] uncontaminatedLikelihoods(final PileupSummary site, final double maf, final double eps) {
+        return infiniteContaminantLikelihoods(site, maf, eps, 0);
     }
 
-    private static double infiniteContaminantLikelihood(final PileupSummary site, final double maf, final double eps, final double c) {
+    private static double[] infiniteContaminantLikelihoods(final PileupSummary site, final double maf, final double eps, final double c) {
         final double f = site.getAlleleFrequency();
         final int k = site.getAltCount();
         final int n = k + site.getRefCount();
 
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) * binom(k, n, (1 - c) * g.af(maf, eps) + c * f)).sum();
+        return applyOverSampleGenotypes(g -> g.prior(f) * binom(k, n, (1 - c) * g.af(maf, eps) + c * f));
     }
 
-    private static double singleContaminantLikelihood(final PileupSummary site, final double maf, final double eps, final double c) {
+    private static double[] singleContaminantLikelihoods(final PileupSummary site, final double maf, final double eps, final double c) {
         final double f = site.getAlleleFrequency();
         final int k = site.getAltCount();
         final int n = k + site.getRefCount();
 
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) * contaminantSum(h -> h.prior(f) * binom(k, n, (1 - c) * g.af(maf, eps) + c * h.af(eps)))).sum();
+        return applyOverSampleGenotypes(g -> g.prior(f) * contaminantSum(h -> h.prior(f) * binom(k, n, (1 - c) * g.af(maf, eps) + c * h.af(eps))));
     }
 
-    private static double twoContaminantLikelihood(final PileupSummary site, final double maf, final double eps, final double c1, final double c2) {
+    private static double[] twoContaminantLikelihoods(final PileupSummary site, final double maf, final double eps, final double c1, final double c2) {
         final double f = site.getAlleleFrequency();
         final int k = site.getAltCount();
         final int n = k + site.getRefCount();
 
-        return Arrays.stream(SampleGenotype.values())
-                .mapToDouble(g -> g.prior(f) *
+        return applyOverSampleGenotypes(g -> g.prior(f) *
                         contaminantSum(h -> h.prior(f) *
-                                contaminantSum(i -> i.prior(f) * binom(k, n, (1 - c1 - c2) * g.af(maf, eps) + c1 * h.af(eps) + c1 * i.af(eps))))).sum();
+                                contaminantSum(i -> i.prior(f) * binom(k, n, (1 - c1 - c2) * g.af(maf, eps) + c1 * h.af(eps) + c1 * i.af(eps)))));
     }
 
     private static double binom(final int k, final int n, final double p) {
         return new BinomialDistribution(null, n, p).probability(k);
     }
 
-    private double likelihood(final PileupSummary site, final double maf) {
+
+
+    private double[] sampleGenotypeLikelihoods(PileupSummary site, double maf) {
+        final double[] likelihoods;
         if(type == ContaminationModelType.NO_CONTAMINANT) {
-            return uncontaminatedLikelihood(site, maf, eps);
+            likelihoods = uncontaminatedLikelihoods(site, maf, eps);
         } else if (type == ContaminationModelType.INFINITE_CONTAMINANT) {
-            return infiniteContaminantLikelihood(site, maf, eps, c);
+            likelihoods = infiniteContaminantLikelihoods(site, maf, eps, c);
         } else if (type == ContaminationModelType.SINGLE_CONTAMINANT) {
-            return singleContaminantLikelihood(site, maf, eps, c);
+            likelihoods = singleContaminantLikelihoods(site, maf, eps, c);
         } else if (type == ContaminationModelType.TWO_CONTAMINANT) {
-            return twoContaminantLikelihood(site, maf, eps, c1, c2);
+            likelihoods = twoContaminantLikelihoods(site, maf, eps, c1, c2);
         } else {
             throw new GATKException.ShouldNeverReachHereException("Unexpected ContaminationModelType");
         }
+        return likelihoods;
+    }
+
+    private double likelihood(final PileupSummary site, final double maf) {
+        return MathUtils.sum(sampleGenotypeLikelihoods(site, maf));
+    }
+
+    public double probability(final PileupSummary site, final double maf, final SampleGenotype sampleGenotype) {
+        final double[] likelihoods = sampleGenotypeLikelihoods(site, maf);
+        return likelihoods[sampleGenotype.ordinal()] / MathUtils.sum(likelihoods);
     }
 
     private double logLikelihood(final PileupSummary site, final double maf) {
@@ -117,14 +128,23 @@ public class ContaminationModel {
         return new IndexRange(0, segments.size()).sum(n -> logLikelihood(segments.get(n), mafs.get(n)));
     }
 
-    private enum SampleGenotype {
+    private static double[] applyOverSampleGenotypes(final ToDoubleFunction<SampleGenotype> func) {
+        final double[] result = new double[SampleGenotype.ALL_SAMPLE_GENOTYPES.size()];
+        for (final SampleGenotype sampleGenotype : SampleGenotype.ALL_SAMPLE_GENOTYPES) {
+            result[sampleGenotype.ordinal()] = func.applyAsDouble(sampleGenotype);
+        }
+        return result;
+    }
+
+    public enum SampleGenotype {
         HOM_REF((maf, eps) -> eps,f -> (1 - f) * (1 - f)),
         ALT_MINOR((maf, eps) -> maf, f -> f * (1 - f)),
         ALT_MAJOR((maf, eps) -> 1 - maf, f -> f * (1 - f)),
         HOM_ALT((maf, eps) -> 1 - eps, f -> f * f);
 
-        final DoubleToDoubleBiFunction alleleFractionFunction;
-        final DoubleUnaryOperator priorFunction;
+        private final DoubleToDoubleBiFunction alleleFractionFunction;
+        private final DoubleUnaryOperator priorFunction;
+        public static final List<SampleGenotype> ALL_SAMPLE_GENOTYPES = Arrays.asList(values());
 
         SampleGenotype(final DoubleToDoubleBiFunction alleleFractionFunction, final DoubleUnaryOperator priorFunction) {
             this.alleleFractionFunction = alleleFractionFunction;
@@ -140,11 +160,12 @@ public class ContaminationModel {
         }
     }
 
-    private enum ContaminantGenotype {
+    public enum ContaminantGenotype {
         HOM_REF(eps -> eps, f -> (1 - f) * ( 1 - f)), HET(eps -> 0.5, f -> 2 * f * (1 - f)), HOM_ALT(eps -> 1 - eps, f -> f * f);
 
-        final DoubleUnaryOperator alleleFractionFunction;   // read af as function of error rate
-        final DoubleUnaryOperator priorFunction;
+        private final DoubleUnaryOperator alleleFractionFunction;   // read af as function of error rate
+        private final DoubleUnaryOperator priorFunction;
+        public static final List<ContaminantGenotype> ALL_CONTAMINANT_GENOTYPES = Arrays.asList(values());
 
         ContaminantGenotype(final DoubleUnaryOperator alleleFractionFunction, final DoubleUnaryOperator priorFunction) {
             this.alleleFractionFunction = alleleFractionFunction;

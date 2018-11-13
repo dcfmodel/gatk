@@ -28,9 +28,12 @@ public class ContaminationEngine {
         return models.get(MathUtils.maxElementIndex(logLikelihoods));
     }
 
-    // TODO: add a hom alt probability method to the model, which can recyle most code from the likelihood method
     public static List<PileupSummary> segmentHomAlts(final ContaminationModel model, final List<PileupSummary> segment, double maf) {
-        return segment.stream().filter(site -> homAltProbability(site, minorAlleleFraction, contamination) > 0.5).collect(Collectors.toList());
+        return segment.stream().filter(site -> model.probability(site, maf, ContaminationModel.SampleGenotype.HOM_ALT) > 0.95).collect(Collectors.toList());
+    }
+
+    public static List<PileupSummary> segmentHomRefs(final ContaminationModel model, final List<PileupSummary> segment, double maf) {
+        return segment.stream().filter(site -> model.probability(site, maf, ContaminationModel.SampleGenotype.HOM_REF) > 0.95).collect(Collectors.toList());
     }
 
     public static Pair<Double, Double> calculateContamination(List<PileupSummary> homAltSites, final double errorRate) {
