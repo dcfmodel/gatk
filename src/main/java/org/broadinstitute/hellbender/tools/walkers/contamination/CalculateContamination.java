@@ -1,7 +1,6 @@
 package org.broadinstitute.hellbender.tools.walkers.contamination;
 
 import htsjdk.samtools.util.OverlapDetector;
-import org.apache.commons.lang.mutable.MutableDouble;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.math3.stat.descriptive.moment.Mean;
 import org.apache.commons.math3.stat.descriptive.rank.Median;
@@ -13,15 +12,12 @@ import org.broadinstitute.barclay.help.DocumentedFeature;
 import org.broadinstitute.hellbender.cmdline.CommandLineProgram;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
 import org.broadinstitute.hellbender.tools.walkers.mutect.FilterMutectCalls;
-import org.broadinstitute.hellbender.utils.SimpleInterval;
 import picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup;
 
 import java.io.File;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 /**
  * <p>
@@ -78,13 +74,9 @@ public class CalculateContamination extends CommandLineProgram {
 
     public static final Logger logger = LogManager.getLogger(CalculateContamination.class);
 
-    private static final int NUM_ITERATIONS = 3;
     private static final int MIN_COVERAGE = 10;
     private static final double DEFAULT_LOW_COVERAGE_RATIO_THRESHOLD = 1.0/2;
     private static final double DEFAULT_HIGH_COVERAGE_RATIO_THRESHOLD = 3.0;
-
-    public static final List<Double> CONTAMINATIONS_FOR_COMPARISON =
-            Arrays.asList(0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.15, 0.2);
 
     @Argument(fullName = StandardArgumentDefinitions.INPUT_LONG_NAME,
             shortName = StandardArgumentDefinitions.INPUT_SHORT_NAME,
@@ -128,70 +120,31 @@ public class CalculateContamination extends CommandLineProgram {
         final List<PileupSummary> genotypingSites = matchedPileupSummariesTable == null ? sites :
                 filterSitesByCoverage(PileupSummary.readFromFile(matchedPileupSummariesTable));
 
-        final double genotypingErrorRate = errorRate(genotypingSites);
+        final ContaminationEngine.Info genotypingInfo = ContaminationEngine.getContaminationInfo(genotypingSites);
 
-        // partition genome into minor allele fraction (MAF) segments to better distinguish hom alts from LoH hets.
-        final List<List<PileupSummary>> genotypingSegments = ContaminationSegmenter.findSegments(genotypingSites);
+        final List<PileupSummary> homAltGenotypingSites = genotypingInfo.homAlts();
+        final List<PileupSummary> homRefGenotypingSites = genotypingInfo.homRefs();
 
-        List<ContaminationModel> genotypingModelsToCompare = makeModelsToCompare(genotypingErrorRate);
-        List<Double> genotypingMAFs = genotypingSegments.stream().map(segment -> 0.5).collect(Collectors.toList());
-        ContaminationModel genotypingModel = ContaminationModel.createNoContaminantModel(genotypingErrorRate);
-
-        for (int n = 0; n < NUM_ITERATIONS; n++) {
-            final ContaminationModel genotypingModelForLambda = genotypingModel;
-            genotypingMAFs = genotypingSegments.stream()
-                    .map(segment -> ContaminationEngine.calculateMinorAlleleFraction(genotypingModelForLambda, segment))
-                    .collect(Collectors.toList());
-            genotypingModel = ContaminationEngine.chooseBestModel(genotypingModelsToCompare, genotypingSegments, genotypingMAFs);
-            // TODO: logging
-        }
-
-        final List<PileupSummary> homAltGenotypingSites = new ArrayList<>();
-        final List<PileupSummary> homRefGenotypingSites = new ArrayList<>();
-        for (int n = 0; n < genotypingSegments.size(); n++) {
-            homAltGenotypingSites.addAll(ContaminationEngine.segmentHomAlts(genotypingModel, genotypingSegments.get(n), genotypingMAFs.get(n)));
-            homAltGenotypingSites.addAll(ContaminationEngine.segmentHomRefs(genotypingModel, genotypingSegments.get(n), genotypingMAFs.get(n)));
-        }
+        final ContaminationEngine.Info tumorInfo = matchedPileupSummariesTable == null ?
+                genotypingInfo : ContaminationEngine.getContaminationInfo(sites);
 
         if (outputTumorSegmentation != null) {
-            final List<List<PileupSummary>> tumorSegments = matchedPileupSummariesTable == null ?
-                    genotypingSegments : ContaminationSegmenter.findSegments(sites);
-            List<MinorAlleleFractionRecord> tumorMinorAlleleFractions = tumorSegments.stream()
-                    .map(this::makeMinorAlleleFractionRecord).collect(Collectors.toList());
-            MinorAlleleFractionRecord.writeToFile(tumorMinorAlleleFractions, outputTumorSegmentation);
-
+            MinorAlleleFractionRecord.writeToFile(tumorInfo.segmentationRecords(), outputTumorSegmentation);
         }
 
+        // TODO: include calculation from hom ref sites as backup for too few hom alts eg targeted panel
         final List<PileupSummary> homAltSites = subsetSites(sites, homAltGenotypingSites);
-        final Pair<Double, Double> contaminationAndError = ContaminationEngine.calculateContamination(homAltSites, errorRate(sites));
-        final double contamination = contaminationAndError.getLeft();
-        final double error = contaminationAndError.getRight();
-        ContaminationRecord.writeToFile(Arrays.asList(new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), contamination, error)), outputTable);
+        final Pair<Double, Double> contaminationAndError = ContaminationEngine.calculateContaminationFromHomAlts(homAltSites, tumorInfo.getErrorRate());
+        ContaminationRecord.writeToFile(Arrays.asList(
+                new ContaminationRecord(ContaminationRecord.Level.WHOLE_BAM.toString(), contaminationAndError.getLeft(), contaminationAndError.getRight())), outputTable);
 
         return "SUCCESS";
-    }
-
-    // in a biallelic site, essentially every non-ref, non-primary alt base is an error, since there are 2 such possible
-    // errors out of 3 total, we multiply by 3/2 to get the total base error rate
-    private double errorRate(List<PileupSummary> sites) {
-        final long totalBases = sites.stream().mapToInt(PileupSummary::getTotalCount).sum();
-        final long otherAltBases = sites.stream().mapToInt(PileupSummary::getOtherAltCount).sum();
-        return 1.5 * ((double) otherAltBases / totalBases);
     }
 
     private static List<PileupSummary> subsetSites(final List<PileupSummary> sites, final List<PileupSummary> subsetLoci) {
         final OverlapDetector<PileupSummary> od = OverlapDetector.create(subsetLoci);
         return sites.stream().filter(od::overlapsAny).collect(Collectors.toList());
     }
-
-    private MinorAlleleFractionRecord makeMinorAlleleFractionRecord(final List<PileupSummary> segment) {
-        final String contig = segment.get(0).getContig();
-        final int start = segment.get(0).getStart();
-        final int end = segment.get(segment.size() - 1).getEnd();
-        final double minorAlleleFraction = ContaminationEngine.calculateMinorAlleleFraction(segment);
-        return new MinorAlleleFractionRecord(new SimpleInterval(contig, start, end), minorAlleleFraction);
-    }
-
 
     private List<PileupSummary> filterSitesByCoverage(final List<PileupSummary> allSites) {
         // Just in case the intervals given to GetPileupSummaries contained un-covered sites, we remove them
@@ -205,17 +158,6 @@ public class CalculateContamination extends CommandLineProgram {
         return coveredSites.stream()
                 .filter(ps -> ps.getTotalCount() > lowCoverageThreshold && ps.getTotalCount() < highCoverageThreshold)
                 .collect(Collectors.toList());
-    }
-
-    private List<ContaminationModel> makeModelsToCompare(final double eps) {
-        final List<ContaminationModel> result = new ArrayList<>();
-        for (final double c : CONTAMINATIONS_FOR_COMPARISON) {
-            result.add(ContaminationModel.createInfiniteContaminantModel(eps, c));
-            result.add(ContaminationModel.createSingleContaminantModel(eps, c));
-            result.add(ContaminationModel.createTwoContaminantModel(eps, 0.5 * c, 0.5 * c));
-            result.add(ContaminationModel.createTwoContaminantModel(eps, 0.25 * c, 0.75 * c));
-        }
-        return result;
     }
 
 }
